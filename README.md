@@ -12,7 +12,7 @@ English Reader Web is a browser-based study app for reading short English passag
 
 ## Live Demo
 
-GitHub Pages URL will be added after publication.
+https://taiki1111-good.github.io/english-reader-web-portfolio/
 
 ## Features
 
@@ -46,7 +46,7 @@ GitHub Pages URL will be added after publication.
 
 ## Screenshots
 
-Screenshots will be added here after publication.
+Screenshots can be added later if needed.
 
 - Passage list with feature badges
 - Reader with grammar labels
@@ -56,7 +56,7 @@ Screenshots will be added here after publication.
 
 ## Status
 
-Portfolio-ready and GitHub Pages-ready for static publication, with ongoing incremental improvements documented in `ops/` and `docs/`.
+Public demo is available via GitHub Pages. The app is a static, localStorage-based learning tool and remains open to incremental improvements.
 
 ## How To Run Locally
 
