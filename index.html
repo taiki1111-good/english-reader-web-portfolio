@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>English Reader Web</title>
+  <link rel="stylesheet" href="css/styles.css?v=reader-select-20260430" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="site-title" href="index.html">English Reader Web</a>
+      <nav class="site-nav" aria-label="メインナビゲーション">
+        <a aria-current="page" href="index.html">教材</a>
+        <a href="vocab.html">単語帳</a>
+        <a href="review.html">復習</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="summary-band">
+        <div>
+          <p class="eyebrow">Local-first reading trainer</p>
+          <h1>英文を読み、気になる語句を保存し、あとで復習する</h1>
+        </div>
+        <div class="stats-grid" aria-label="学習状況">
+          <div>
+            <strong id="savedCount">0</strong>
+            <span>保存語句</span>
+          </div>
+          <div>
+            <strong id="readCount">0</strong>
+            <span>既読教材</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="toolbar" aria-label="教材フィルター">
+        <label>
+          難易度
+          <select id="difficultyFilter">
+            <option value="all">すべて</option>
+            <option value="beginner">初級</option>
+            <option value="intermediate">中級</option>
+            <option value="advanced">上級</option>
+          </select>
+        </label>
+        <label>
+          タグ
+          <input id="tagSearch" type="search" placeholder="daily-life" />
+        </label>
+        <label>
+          語数
+          <select id="wordCountFilter">
+            <option value="all">すべて</option>
+            <option value="short">150語以下</option>
+            <option value="medium">151-200語</option>
+            <option value="long">201語以上</option>
+          </select>
+        </label>
+        <label>
+          既読状態
+          <select id="readStatusFilter">
+            <option value="all">すべて</option>
+            <option value="read">既読済み</option>
+            <option value="unread">未読</option>
+          </select>
+        </label>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2>教材一覧</h2>
+          <a class="text-link" href="vocab.html">単語帳を見る</a>
+        </div>
+        <div id="passageList" class="card-list" aria-live="polite"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="js/storage.js?v=reader-select-20260430"></script>
+  <script src="js/app.js?v=reader-select-20260430"></script>
+  <script>
+    let allPassages = [];
+
+    function matchesWordCount(passage, filter) {
+      const count = getWordCount(passage);
+      if (filter === "short") return count <= 150;
+      if (filter === "medium") return count >= 151 && count <= 200;
+      if (filter === "long") return count >= 201;
+      return true;
+    }
+
+    function matchesTag(passage, query) {
+      const normalized = query.trim().toLowerCase().replace(/^#/, "");
+      if (!normalized) return true;
+      return (passage.tags || []).some(tag => tag.toLowerCase().replace(/^#/, "").includes(normalized));
+    }
+
+    function renderStats() {
+      document.getElementById("savedCount").textContent = getSavedWords().length;
+      document.getElementById("readCount").textContent = Object.keys(getReadPassages()).length;
+    }
+
+    function renderFeatureBadges(passage) {
+      const badges = [];
+      if (passage?.features?.grammarQuiz) {
+        badges.push('<span class="feature-badge feature-badge-grammar">文型対応</span>');
+      }
+      if (passage?.features?.idioms) {
+        badges.push('<span class="feature-badge feature-badge-idiom">熟語あり</span>');
+      }
+      if (!badges.length) {
+        return "";
+      }
+      return `<div class="feature-badges" aria-label="教材機能">${badges.join("")}</div>`;
+    }
+
+    function renderPassageList() {
+      const list = document.getElementById("passageList");
+      const difficulty = document.getElementById("difficultyFilter").value;
+      const tag = document.getElementById("tagSearch").value;
+      const wordCount = document.getElementById("wordCountFilter").value;
+      const readStatus = document.getElementById("readStatusFilter").value;
+      const readPassages = getReadPassages();
+      const passages = allPassages.filter(passage => {
+        const isRead = Boolean(readPassages[passage.id]?.read);
+        return passage.status !== "archived"
+          && (difficulty === "all" || passage.difficulty === difficulty)
+          && (readStatus === "all" || (readStatus === "read" ? isRead : !isRead))
+          && matchesTag(passage, tag)
+          && matchesWordCount(passage, wordCount);
+      });
+
+      if (!passages.length) {
+        const hasLessons = allPassages.some(passage => passage.status !== "archived");
+        const message = hasLessons
+          ? "フィルタ条件に合う教材がありません。条件をリセットして教材一覧を表示できます。"
+          : "表示できる教材がありません。data/passages.json に active な教材を追加してください。";
+        list.innerHTML = `
+          <div class="message message-info">
+            <p>${message}</p>
+            ${hasLessons ? '<button class="button" id="resetFiltersButton" type="button">条件をリセット</button>' : ""}
+          </div>
+        `;
+        return;
+      }
+
+      list.innerHTML = passages.map(passage => {
+        const isRead = Boolean(readPassages[passage.id]?.read);
+        const tags = (passage.tags || []).map(tagName => `<span>#${tagName.replace(/^#/, "")}</span>`).join("");
+        return `
+          <article class="lesson-card">
+            <div class="card-main">
+              <div class="card-title-row">
+                <h3><a href="reader.html?v=reader-select-20260430&id=${encodeURIComponent(passage.id)}">${passage.title}</a></h3>
+                ${isRead ? '<span class="status-badge">既読</span>' : ""}
+              </div>
+              ${renderFeatureBadges(passage)}
+              <p>${passage.summary_ja || passage.text.slice(0, 120) + "..."}</p>
+              <div class="meta-row">
+                <span>${passage.level_hint || "CEFR"}</span>
+                <span>${getDifficultyLabel(passage.difficulty)}</span>
+                <span>${getWordCount(passage)}語</span>
+                ${tags}
+              </div>
+            </div>
+            <div class="card-actions">
+              <button class="button" type="button" data-toggle-read="${encodeURIComponent(passage.id)}">${isRead ? "未読に戻す" : "既読にする"}</button>
+              <a class="button primary" href="reader.html?v=reader-select-20260430&id=${encodeURIComponent(passage.id)}">読む</a>
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    async function init() {
+      const list = document.getElementById("passageList");
+      try {
+        allPassages = await fetchJson("data/passages.json");
+        renderStats();
+        renderPassageList();
+      } catch (error) {
+        showMessage(list, error.message, "error");
+      }
+    }
+
+    document.getElementById("difficultyFilter").addEventListener("change", renderPassageList);
+    document.getElementById("tagSearch").addEventListener("input", renderPassageList);
+    document.getElementById("wordCountFilter").addEventListener("change", renderPassageList);
+    document.getElementById("readStatusFilter").addEventListener("change", renderPassageList);
+    document.getElementById("passageList").addEventListener("click", event => {
+      const readToggle = event.target.closest("[data-toggle-read]");
+      if (readToggle) {
+        const passageId = decodeURIComponent(readToggle.dataset.toggleRead);
+        const isRead = Boolean(getReadPassages()[passageId]?.read);
+        setReadPassage(passageId, !isRead);
+        renderStats();
+        renderPassageList();
+        return;
+      }
+
+      if (event.target.id !== "resetFiltersButton") {
+        return;
+      }
+
+      document.getElementById("difficultyFilter").value = "all";
+      document.getElementById("tagSearch").value = "";
+      document.getElementById("wordCountFilter").value = "all";
+      document.getElementById("readStatusFilter").value = "all";
+      renderPassageList();
+    });
+    document.addEventListener("DOMContentLoaded", init);
+  </script>
+</body>
+</html>

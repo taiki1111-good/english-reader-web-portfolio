@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flashcard - English Reader Web</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body class="flashcard-page">
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="site-title" href="index.html">English Reader Web</a>
+      <nav class="site-nav" aria-label="メインナビゲーション">
+        <a href="index.html">教材</a>
+        <a href="vocab.html">単語帳</a>
+        <a aria-current="page" href="review.html">復習</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Flashcard</p>
+          <h1>フラッシュカード</h1>
+        </div>
+        <div class="card-actions">
+          <a class="button" href="review.html">暗記シートへ</a>
+          <a class="button" href="vocab.html">単語帳へ</a>
+        </div>
+      </section>
+
+      <section class="flash-settings" aria-label="フラッシュカード設定">
+        <label class="flash-setting-group">
+          <span>対象</span>
+          <select id="folderFilter">
+            <option value="all">全単語</option>
+          </select>
+        </label>
+
+        <div class="flash-setting-group">
+          <span>初期表示</span>
+          <div class="flash-option-list" role="group" aria-label="初期表示">
+            <button class="flash-option is-selected" type="button" data-front-mode="word">英単語</button>
+            <button class="flash-option" type="button" data-front-mode="meaning">日本語意味</button>
+          </div>
+        </div>
+
+        <div class="flash-setting-group">
+          <span>並び順</span>
+          <div class="flash-option-list" role="group" aria-label="並び順">
+            <button class="flash-option is-selected" type="button" data-order-mode="normal">通常</button>
+            <button class="flash-option" type="button" data-order-mode="random">ランダム</button>
+          </div>
+        </div>
+
+        <div class="flash-setting-group">
+          <span>表示</span>
+          <div class="setting-buttons">
+            <button id="shuffleButton" class="button" type="button">再シャッフル</button>
+            <button id="focusModeButton" class="button primary" type="button">集中モード</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="flashStudyBoard" class="flash-study-board" aria-live="polite"></section>
+      <section id="flashCardList" class="flashcard-strip" aria-label="カード一覧"></section>
+    </main>
+  </div>
+
+  <section id="focusPanel" class="flash-focus-panel" hidden aria-live="polite">
+    <div class="flash-focus-inner">
+      <div class="flash-focus-top">
+        <p id="focusProgress" class="flash-progress">0 / 0</p>
+      </div>
+      <article id="focusCard" class="flash-focus-card" role="button" tabindex="0"></article>
+      <div class="flash-focus-nav">
+        <button id="focusPrevButton" class="button" type="button">前へ</button>
+        <button id="focusFlipButton" class="button primary" type="button">表裏切替</button>
+        <button id="focusNextButton" class="button" type="button">次へ</button>
+      </div>
+      <div class="flash-focus-close-row">
+        <button id="closeFocusButton" class="button" type="button">集中モードを終了</button>
+      </div>
+    </div>
+  </section>
+
+  <script src="js/storage.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    const POS_LABELS_JA = {
+      noun: "名詞",
+      verb: "動詞",
+      adjective: "形容詞",
+      adverb: "副詞",
+      pronoun: "代名詞",
+      preposition: "前置詞",
+      conjunction: "接続詞",
+      interjection: "間投詞",
+      determiner: "限定詞",
+      article: "冠詞",
+      auxiliary: "助動詞",
+      modal: "助動詞",
+      particle: "助詞",
+      idiom: "熟語"
+    };
+
+    const revealedCards = new Set();
+    let frontMode = "word";
+    let orderMode = "normal";
+    let orderedWordIds = [];
+    let visibleWords = [];
+    let currentIndex = 0;
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function escapeRegExp(value) {
+      return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function shuffleArray(values) {
+      const copied = [...values];
+      for (let index = copied.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [copied[index], copied[swapIndex]] = [copied[swapIndex], copied[index]];
+      }
+      return copied;
+    }
+
+    function toPartOfSpeechJa(value) {
+      const normalized = String(value || "").trim().toLowerCase();
+      return normalized ? POS_LABELS_JA[normalized] || value : "";
+    }
+
+    function getDictionaryEntriesForDisplay(item) {
+      const merged = new Map();
+      const rawEntries = Array.isArray(item.dictionary_entries) ? item.dictionary_entries : [];
+
+      function addEntry(part, meanings) {
+        const normalizedPart = String(part || "").trim();
+        const normalizedMeanings = (Array.isArray(meanings) ? meanings : [meanings])
+          .map(meaning => String(meaning || "").trim())
+          .filter(Boolean);
+        if (!normalizedPart || !normalizedMeanings.length) {
+          return;
+        }
+        const existing = merged.get(normalizedPart) || new Set();
+        normalizedMeanings.forEach(meaning => existing.add(meaning));
+        merged.set(normalizedPart, existing);
+      }
+
+      rawEntries.forEach(entry => {
+        const dictionaryEntry = entry || {};
+        addEntry(
+          dictionaryEntry.partOfSpeech || dictionaryEntry.part_of_speech,
+          dictionaryEntry.meaningsJa || dictionaryEntry.meanings_ja || dictionaryEntry.meaningJa || dictionaryEntry.meaning_ja
+        );
+      });
+      addEntry(item.part_of_speech, item.meaning_ja);
+
+      const primaryPart = String(item.part_of_speech || "").trim().toLowerCase();
+      return [...merged.entries()].map(([partOfSpeech, meanings]) => ({
+        partOfSpeech,
+        partOfSpeechJa: toPartOfSpeechJa(partOfSpeech),
+        meaningsJa: [...meanings]
+      })).sort((left, right) => {
+        const leftPrimary = String(left.partOfSpeech || "").trim().toLowerCase() === primaryPart;
+        const rightPrimary = String(right.partOfSpeech || "").trim().toLowerCase() === primaryPart;
+        if (leftPrimary === rightPrimary) {
+          return 0;
+        }
+        return leftPrimary ? -1 : 1;
+      });
+    }
+
+    function renderFolderOptions() {
+      const folders = getVocabFolders();
+      const filter = document.getElementById("folderFilter");
+      const current = filter.value;
+      filter.innerHTML = `
+        <option value="all">全単語</option>
+        ${folders.map(folder => `<option value="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</option>`).join("")}
+      `;
+      filter.value = ["all", ...folders.map(folder => folder.id)].includes(current) ? current : "all";
+    }
+
+    function getFilteredWords() {
+      const folderId = document.getElementById("folderFilter").value;
+      return getSavedWords().filter(item => {
+        const folderIds = Array.isArray(item.folder_ids) ? item.folder_ids : [];
+        return folderId === "all" || folderIds.includes(folderId);
+      });
+    }
+
+    function getOrderedWords(forceShuffle = false) {
+      const words = getFilteredWords();
+      const ids = words.map(item => item.id);
+      const sameSet = orderedWordIds.length === ids.length && orderedWordIds.every(id => ids.includes(id));
+      if (!sameSet || (orderMode === "random" && forceShuffle)) {
+        orderedWordIds = orderMode === "random" ? shuffleArray(ids) : ids;
+      } else if (orderMode === "normal") {
+        orderedWordIds = ids;
+      }
+      const byId = new Map(words.map(item => [item.id, item]));
+      visibleWords = orderedWordIds.map(id => byId.get(id)).filter(Boolean);
+      if (currentIndex >= visibleWords.length) {
+        currentIndex = Math.max(visibleWords.length - 1, 0);
+      }
+      return visibleWords;
+    }
+
+    function currentWord() {
+      if (!visibleWords.length) {
+        return null;
+      }
+      currentIndex = Math.min(Math.max(currentIndex, 0), visibleWords.length - 1);
+      return visibleWords[currentIndex];
+    }
+
+    function shouldShowWordFace(item) {
+      const revealed = revealedCards.has(item.id);
+      return revealed ? frontMode !== "word" : frontMode === "word";
+    }
+
+    function renderMeaningList(item) {
+      const entries = getDictionaryEntriesForDisplay(item);
+      if (!entries.length) {
+        return '<p class="muted">意味は未登録です。</p>';
+      }
+      return `
+        <ul class="dictionary-list dictionary-list-vertical">
+          ${entries.map(entry => `
+            <li>
+              <strong>${escapeHtml(entry.partOfSpeechJa || entry.partOfSpeech)}</strong>
+              <span>${escapeHtml(entry.meaningsJa.join("、"))}</span>
+            </li>
+          `).join("")}
+        </ul>
+      `;
+    }
+
+    function addInflectedAnswerTerms(terms, value) {
+      const word = String(value || "").trim().toLowerCase();
+      if (!/^[a-z]+$/.test(word)) {
+        return;
+      }
+
+      terms.add(word);
+
+      const irregulars = {
+        be: ["am", "is", "are", "was", "were", "been", "being"],
+        begin: ["began", "begun", "beginning"],
+        come: ["came", "coming"],
+        do: ["does", "did", "done", "doing"],
+        eat: ["ate", "eaten", "eating"],
+        feel: ["felt", "feeling"],
+        find: ["found", "finding"],
+        give: ["gave", "given", "giving"],
+        go: ["went", "gone", "going", "goes"],
+        have: ["has", "had", "having"],
+        know: ["knew", "known", "knowing"],
+        make: ["made", "making"],
+        sit: ["sat", "sitting"],
+        take: ["took", "taken", "taking"],
+        write: ["wrote", "written", "writing"]
+      };
+      (irregulars[word] || []).forEach(term => terms.add(term));
+
+      if (word.length < 3) {
+        return;
+      }
+
+      [
+        `${word}s`,
+        `${word}es`,
+        `${word}d`,
+        `${word}ed`,
+        `${word}ing`
+      ].forEach(term => terms.add(term));
+
+      if (word.endsWith("e")) {
+        terms.add(`${word.slice(0, -1)}ing`);
+      }
+      if (word.endsWith("y")) {
+        terms.add(`${word.slice(0, -1)}ies`);
+        terms.add(`${word.slice(0, -1)}ied`);
+      }
+    }
+
+    function getAnswerTerms(item) {
+      const terms = new Set();
+      [item.word, item.lemma].forEach(value => {
+        const term = String(value || "").trim();
+        if (!term) {
+          return;
+        }
+        terms.add(term.toLowerCase());
+        if (!/\s/.test(term)) {
+          addInflectedAnswerTerms(terms, term);
+        }
+      });
+      (Array.isArray(item.component_words) ? item.component_words : []).forEach(value => {
+        const term = String(value || "").trim();
+        if (term) {
+          terms.add(term.toLowerCase());
+        }
+      });
+      return [...terms].sort((left, right) => right.length - left.length);
+    }
+
+    function maskAnswerTerms(text, item) {
+      const terms = getAnswerTerms(item);
+      if (!terms.length) {
+        return text;
+      }
+      const pattern = terms
+        .map(term => term.split(/\s+/).map(escapeRegExp).join("\\s+"))
+        .join("|");
+      const answerPattern = new RegExp(`(^|[^A-Za-z])(${pattern})(?=$|[^A-Za-z])`, "gi");
+      return String(text || "").replace(answerPattern, (match, prefix) => `${prefix}____`);
+    }
+
+    function renderExample(item, hideAnswer = false) {
+      const example = String(item.example || "").trim();
+      const translation = String(item.example_translation_ja || "").trim();
+      if (!example && !translation) {
+        return "";
+      }
+      const displayExample = hideAnswer ? maskAnswerTerms(example, item) : example;
+      return `
+        <div class="flash-example">
+          ${displayExample ? `<p lang="en">${escapeHtml(displayExample)}</p>` : ""}
+          ${translation ? `<p>${escapeHtml(translation)}</p>` : ""}
+        </div>
+      `;
+    }
+
+    function renderCardFace(item, compact = false) {
+      const wordText = escapeHtml(item.word || item.lemma || "");
+      const typeLabel = item.type === "idiom" ? "熟語" : "単語";
+      const showWordFace = shouldShowWordFace(item);
+      const hideAnswerOnMeaningFace = !showWordFace && frontMode === "meaning" && !revealedCards.has(item.id);
+      if (showWordFace) {
+        return {
+          theme: "face-word",
+          html: `
+            <p class="flash-card-kicker">${typeLabel}</p>
+            <h2>${wordText}</h2>
+            ${!compact && item.passage_title ? `<p class="flash-source">${escapeHtml(item.passage_title)}</p>` : ""}
+          `
+        };
+      }
+      return {
+        theme: "face-meaning",
+        html: `
+          <p class="flash-card-kicker">${typeLabel}</p>
+          ${hideAnswerOnMeaningFace ? "" : compact ? `<h3>${wordText}</h3>` : `<p class="flash-answer-word">${wordText}</p>`}
+          ${renderMeaningList(item)}
+          ${compact ? "" : renderExample(item, hideAnswerOnMeaningFace)}
+        `
+      };
+    }
+
+    function renderStudyBoard() {
+      const root = document.getElementById("flashStudyBoard");
+      const word = currentWord();
+      if (!word) {
+        const totalSavedWords = getSavedWords();
+        if (!totalSavedWords.length) {
+          root.innerHTML = `
+            <div class="message message-info">
+              <p>フラッシュカードに表示できる語句がありません。</p>
+              <p>reader で語句を save し、tray から単語帳へ保存すると、ここでカードとして確認できます。</p>
+              <div class="empty-actions">
+                <a class="button" href="index.html">教材一覧へ</a>
+                <a class="button" href="vocab.html">単語帳へ</a>
+              </div>
+            </div>
+          `;
+        } else {
+          root.innerHTML = `
+            <div class="message message-info">
+              <p>この条件で表示できる語句がありません。</p>
+              <p>対象フォルダを見直すか、単語帳で語句を確認してください。</p>
+              <div class="empty-actions">
+                <a class="button" href="vocab.html">単語帳へ</a>
+              </div>
+            </div>
+          `;
+        }
+        return;
+      }
+
+      const face = renderCardFace(word);
+      const passageLink = word.passage_id
+        ? `<a class="button" href="reader.html?id=${encodeURIComponent(word.passage_id)}">本文へ</a>`
+        : "";
+      root.innerHTML = `
+        <div class="flash-study-top">
+          <p class="flash-progress">${currentIndex + 1} / ${visibleWords.length}</p>
+        </div>
+        <article id="studyCard" class="flash-study-card ${face.theme}" role="button" tabindex="0" data-study-card-id="${word.id}">
+          <div class="flash-face">${face.html}</div>
+          <p class="flash-card-hint">${revealedCards.has(word.id) ? "タップして戻す" : "タップして反転"}</p>
+        </article>
+        <div class="flash-study-nav">
+          <div class="flash-study-nav-row flash-study-nav-row-main">
+            <button id="studyPrevButton" class="button" type="button" ${currentIndex <= 0 ? "disabled" : ""}>前へ</button>
+            <button id="studyNextButton" class="button" type="button" ${currentIndex >= visibleWords.length - 1 ? "disabled" : ""}>次へ</button>
+          </div>
+          <div class="flash-study-nav-row">
+            <button id="studyFlipButton" class="button primary" type="button">表裏切替</button>
+          </div>
+          ${passageLink ? `<div class="flash-study-nav-row">${passageLink}</div>` : ""}
+        </div>
+      `;
+    }
+
+    function renderStrip() {
+      const root = document.getElementById("flashCardList");
+      if (!visibleWords.length) {
+        root.innerHTML = "";
+        return;
+      }
+      root.innerHTML = visibleWords.map((item, index) => {
+        const face = renderCardFace(item, true);
+        return `
+          <article class="flash-tile ${face.theme} ${index === currentIndex ? "is-active" : ""}" role="button" tabindex="0" data-strip-card-id="${item.id}">
+            <div class="flash-face">${face.html}</div>
+            <p class="flash-tile-index">${index + 1}</p>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function renderFocusCard() {
+      const word = currentWord();
+      const card = document.getElementById("focusCard");
+      const progress = document.getElementById("focusProgress");
+      if (!word) {
+        card.innerHTML = "";
+        progress.textContent = "0 / 0";
+        return;
+      }
+      const face = renderCardFace(word);
+      card.className = `flash-focus-card ${face.theme}`;
+      card.dataset.focusCardId = word.id;
+      card.innerHTML = `
+        <div class="flash-face">${face.html}</div>
+        <p class="flash-card-hint">${revealedCards.has(word.id) ? "タップして戻す" : "タップして反転"}</p>
+      `;
+      progress.textContent = `${currentIndex + 1} / ${visibleWords.length}`;
+      document.getElementById("focusPrevButton").disabled = currentIndex <= 0;
+      document.getElementById("focusNextButton").disabled = currentIndex >= visibleWords.length - 1;
+    }
+
+    function renderAll(forceShuffle = false) {
+      renderFolderOptions();
+      getOrderedWords(forceShuffle);
+      updateOptionState();
+      const hasVisibleWords = visibleWords.length > 0;
+      document.getElementById("shuffleButton").disabled = !hasVisibleWords;
+      document.getElementById("focusModeButton").disabled = !hasVisibleWords;
+      renderStudyBoard();
+      renderStrip();
+      if (!document.getElementById("focusPanel").hidden) {
+        renderFocusCard();
+      }
+    }
+
+    function updateOptionState() {
+      document.querySelectorAll("[data-front-mode]").forEach(button => {
+        button.classList.toggle("is-selected", button.dataset.frontMode === frontMode);
+      });
+      document.querySelectorAll("[data-order-mode]").forEach(button => {
+        button.classList.toggle("is-selected", button.dataset.orderMode === orderMode);
+      });
+    }
+
+    function revealCurrent(value = null) {
+      const word = currentWord();
+      if (!word) {
+        return;
+      }
+      const shouldReveal = value === null ? !revealedCards.has(word.id) : value;
+      if (shouldReveal) {
+        revealedCards.add(word.id);
+      } else {
+        revealedCards.delete(word.id);
+      }
+      renderAll();
+    }
+
+    function moveCurrent(step) {
+      if (!visibleWords.length) {
+        return;
+      }
+      const nextIndex = Math.min(Math.max(currentIndex + step, 0), visibleWords.length - 1);
+      if (nextIndex === currentIndex) {
+        return;
+      }
+      currentIndex = nextIndex;
+      const word = currentWord();
+      if (word) {
+        revealedCards.delete(word.id);
+      }
+      renderAll();
+    }
+
+    function selectCard(cardId) {
+      const nextIndex = visibleWords.findIndex(item => item.id === cardId);
+      if (nextIndex < 0) {
+        return;
+      }
+      if (nextIndex === currentIndex) {
+        revealCurrent();
+        return;
+      }
+      currentIndex = nextIndex;
+      revealedCards.delete(cardId);
+      renderAll();
+    }
+
+    function openFocusPanel() {
+      if (!visibleWords.length) {
+        return;
+      }
+      document.getElementById("focusPanel").hidden = false;
+      renderFocusCard();
+      document.getElementById("focusCard").focus();
+    }
+
+    function closeFocusPanel() {
+      document.getElementById("focusPanel").hidden = true;
+    }
+
+    document.addEventListener("click", event => {
+      if (event.target.closest("a")) {
+        return;
+      }
+
+      const frontModeButton = event.target.closest("[data-front-mode]");
+      if (frontModeButton) {
+        frontMode = frontModeButton.dataset.frontMode;
+        revealedCards.clear();
+        renderAll();
+        return;
+      }
+
+      const orderModeButton = event.target.closest("[data-order-mode]");
+      if (orderModeButton) {
+        orderMode = orderModeButton.dataset.orderMode;
+        orderedWordIds = [];
+        currentIndex = 0;
+        revealedCards.clear();
+        renderAll(orderMode === "random");
+        return;
+      }
+
+      const stripCard = event.target.closest("[data-strip-card-id]");
+      if (stripCard) {
+        selectCard(stripCard.dataset.stripCardId);
+        return;
+      }
+
+      if (event.target.closest("#studyCard") || event.target.closest("#focusCard")) {
+        revealCurrent();
+        return;
+      }
+
+      if (event.target.closest("#focusPanel") && !event.target.closest(".flash-focus-inner")) {
+        closeFocusPanel();
+      }
+    });
+
+    document.addEventListener("keydown", event => {
+      const focusOpen = !document.getElementById("focusPanel").hidden;
+      if (focusOpen && event.key === "Escape") {
+        closeFocusPanel();
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        moveCurrent(-1);
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        moveCurrent(1);
+        return;
+      }
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      const activeCard = event.target.closest("[data-study-card-id], [data-focus-card-id], [data-strip-card-id]");
+      if (activeCard || focusOpen) {
+        event.preventDefault();
+        revealCurrent();
+      }
+    });
+
+    document.getElementById("folderFilter").addEventListener("change", () => {
+      orderedWordIds = [];
+      currentIndex = 0;
+      revealedCards.clear();
+      renderAll(orderMode === "random");
+    });
+    document.getElementById("shuffleButton").addEventListener("click", () => {
+      orderMode = "random";
+      orderedWordIds = [];
+      currentIndex = 0;
+      revealedCards.clear();
+      renderAll(true);
+    });
+    document.getElementById("focusModeButton").addEventListener("click", openFocusPanel);
+    document.getElementById("closeFocusButton").addEventListener("click", closeFocusPanel);
+    document.getElementById("studyPrevButton")?.addEventListener("click", () => moveCurrent(-1));
+    document.getElementById("studyNextButton")?.addEventListener("click", () => moveCurrent(1));
+    document.getElementById("studyFlipButton")?.addEventListener("click", () => revealCurrent());
+    document.getElementById("focusPrevButton").addEventListener("click", () => moveCurrent(-1));
+    document.getElementById("focusNextButton").addEventListener("click", () => moveCurrent(1));
+    document.getElementById("focusFlipButton").addEventListener("click", () => revealCurrent());
+
+    document.addEventListener("click", event => {
+      if (event.target.closest("#studyPrevButton")) {
+        moveCurrent(-1);
+      }
+      if (event.target.closest("#studyNextButton")) {
+        moveCurrent(1);
+      }
+      if (event.target.closest("#studyFlipButton")) {
+        revealCurrent();
+      }
+    });
+
+    document.addEventListener("DOMContentLoaded", () => {
+      renderAll();
+    });
+  </script>
+</body>
+</html>

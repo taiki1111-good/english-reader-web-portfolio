@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vocabulary - English Reader Web</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="site-title" href="index.html">English Reader Web</a>
+      <nav class="site-nav" aria-label="メインナビゲーション">
+        <a href="index.html">教材</a>
+        <a aria-current="page" href="vocab.html">単語帳</a>
+        <a href="review.html">復習</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Vocabulary notebook</p>
+          <h1>単語帳</h1>
+        </div>
+        <a class="button" href="review.html">復習へ</a>
+      </section>
+
+      <section class="toolbar">
+        <label>
+          検索
+          <input id="searchInput" type="search" placeholder="word / meaning / passage" />
+        </label>
+        <label>
+          種別
+          <select id="typeFilter">
+            <option value="all">すべて</option>
+            <option value="word">単語</option>
+            <option value="idiom">熟語</option>
+          </select>
+        </label>
+        <label>
+          フォルダ
+          <select id="folderFilter">
+            <option value="all">すべて</option>
+            <option value="none">未分類</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="folder-panel" aria-label="単語帳フォルダ">
+        <form id="folderForm" class="folder-form">
+          <label>
+            新しいフォルダ
+            <input id="folderNameInput" type="text" placeholder="例: 苦手単語" />
+          </label>
+          <button class="button primary" type="submit">作成</button>
+        </form>
+        <div id="folderList" class="folder-list"></div>
+        <div id="vocabMessage"></div>
+      </section>
+
+      <section id="wordList" class="card-list" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <script src="js/storage.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    const openDetailsState = {
+      meaning: new Map(),
+      folders: new Map(),
+      example: new Map()
+    };
+
+    const POS_LABELS_JA = {
+      noun: "名詞",
+      verb: "動詞",
+      adjective: "形容詞",
+      adverb: "副詞",
+      pronoun: "代名詞",
+      preposition: "前置詞",
+      conjunction: "接続詞",
+      interjection: "間投詞",
+      determiner: "限定詞",
+      article: "冠詞",
+      auxiliary: "助動詞",
+      modal: "助動詞",
+      particle: "助詞",
+      idiom: "熟語"
+    };
+
+    function toPartOfSpeechJa(value) {
+      const normalized = String(value || "").trim().toLowerCase();
+      if (!normalized) {
+        return "";
+      }
+      return POS_LABELS_JA[normalized] || value;
+    }
+
+    function captureOpenDetailsState() {
+      openDetailsState.meaning = new Map();
+      openDetailsState.folders = new Map();
+      openDetailsState.example = new Map();
+      document.querySelectorAll("details[data-panel][data-word-id]").forEach(element => {
+        const panel = element.dataset.panel;
+        const wordId = element.dataset.wordId;
+        if (!panel || !wordId || !openDetailsState[panel]) {
+          return;
+        }
+        openDetailsState[panel].set(wordId, element.open);
+      });
+    }
+
+    function isPanelOpen(panel, wordId) {
+      const state = openDetailsState[panel];
+      if (!state || !state.has(wordId)) {
+        return true;
+      }
+      return state.get(wordId);
+    }
+
+    function getDictionaryEntriesForDisplay(item) {
+      const merged = new Map();
+      const rawEntries = Array.isArray(item.dictionary_entries) ? item.dictionary_entries : [];
+
+      function addEntry(part, meanings) {
+        const normalizedPart = String(part || "").trim();
+        const normalizedMeanings = (Array.isArray(meanings) ? meanings : [meanings])
+          .map(meaning => String(meaning || "").trim())
+          .filter(Boolean);
+        if (!normalizedPart || !normalizedMeanings.length) {
+          return;
+        }
+        const existing = merged.get(normalizedPart) || new Set();
+        normalizedMeanings.forEach(meaning => existing.add(meaning));
+        merged.set(normalizedPart, existing);
+      }
+
+      rawEntries.forEach(entry => {
+        const item = entry || {};
+        addEntry(item.partOfSpeech || item.part_of_speech, item.meaningsJa || item.meanings_ja || item.meaningJa || item.meaning_ja);
+      });
+      addEntry(item.part_of_speech, item.meaning_ja);
+
+      return [...merged.entries()].map(([partOfSpeech, meanings]) => ({
+        partOfSpeech,
+        partOfSpeechJa: toPartOfSpeechJa(partOfSpeech),
+        meaningsJa: [...meanings]
+      }));
+    }
+
+    function renderFolderFilter(folders) {
+      const current = document.getElementById("folderFilter").value;
+      document.getElementById("folderFilter").innerHTML = `
+        <option value="all">すべて</option>
+        <option value="none">未分類</option>
+        ${folders.map(folder => `<option value="${folder.id}">${folder.name}</option>`).join("")}
+      `;
+      document.getElementById("folderFilter").value = [...folders.map(folder => folder.id), "all", "none"].includes(current) ? current : "all";
+    }
+
+    function renderFolders(folders) {
+      const root = document.getElementById("folderList");
+      if (!folders.length) {
+        root.innerHTML = '<p class="muted">フォルダはまだありません。</p>';
+        return;
+      }
+      root.innerHTML = folders.map(folder => `
+        <span class="folder-chip">
+          ${folder.name}
+          <button type="button" aria-label="${folder.name} を削除" data-delete-folder="${folder.id}">×</button>
+        </span>
+      `).join("");
+    }
+
+    function renderFolderCheckboxes(item, folders) {
+      if (!folders.length) {
+        return '<p class="muted">フォルダを作成すると、ここで所属を選べます。</p>';
+      }
+      return `
+        <div class="folder-checkboxes" aria-label="${item.word} のフォルダ所属">
+          ${folders.map(folder => `
+            <label>
+              <input type="checkbox" data-folder-toggle="${folder.id}" data-word-id="${item.id}" ${item.folder_ids.includes(folder.id) ? "checked" : ""} />
+              ${folder.name}
+            </label>
+          `).join("")}
+        </div>
+      `;
+    }
+
+    function renderDictionaryEntries(item) {
+      const entries = getDictionaryEntriesForDisplay(item);
+      if (!entries.length) {
+        return '<p class="muted">品詞と意味は未登録です。</p>';
+      }
+      return `
+        <ul class="dictionary-list">
+          ${entries.map(entry => `<li><strong>${entry.partOfSpeechJa || entry.partOfSpeech}</strong><span>${(entry.meaningsJa || []).join("、")}</span></li>`).join("")}
+        </ul>
+      `;
+    }
+
+    function renderWords() {
+      const root = document.getElementById("wordList");
+      captureOpenDetailsState();
+      const folders = getVocabFolders();
+      renderFolderFilter(folders);
+      renderFolders(folders);
+      const query = document.getElementById("searchInput").value.trim().toLowerCase();
+      const type = document.getElementById("typeFilter").value;
+      const folder = document.getElementById("folderFilter").value;
+      const words = getSavedWords().filter(item => {
+        const matchesType = type === "all" || item.type === type;
+        const matchesFolder = folder === "all"
+          || (folder === "none" && !item.folder_ids.length)
+          || item.folder_ids.includes(folder);
+        const dictionaryText = getDictionaryEntriesForDisplay(item)
+          .map(entry => [entry.partOfSpeech, entry.partOfSpeechJa, ...(entry.meaningsJa || [])].join(" "))
+          .join(" ");
+        const haystack = [item.word, item.lemma, item.meaning_ja, item.part_of_speech, item.passage_title, item.example, item.example_translation_ja, dictionaryText].join(" ").toLowerCase();
+        return matchesType && matchesFolder && (!query || haystack.includes(query));
+      });
+
+      if (!words.length) {
+        root.innerHTML = `
+          <div class="message message-info">
+            <p>まだ単語帳に保存された語句はありません。</p>
+            <p>教材を開き、気になる単語や表現を save して tray に入れたあと、単語帳に保存してください。</p>
+            <div class="empty-actions">
+              <a class="button" href="index.html">教材一覧へ戻る</a>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      root.innerHTML = words.map(item => `
+        <article class="vocab-card">
+          <div>
+            <div class="card-title-row">
+              <h2>${item.word}</h2>
+              <span class="status-badge">${item.type === "idiom" ? "熟語" : "単語"}</span>
+            </div>
+            <div class="meta-row">
+              ${item.lemma ? `<span>原形: ${item.lemma}</span>` : ""}
+              ${item.part_of_speech ? `<span>${toPartOfSpeechJa(item.part_of_speech)}</span>` : ""}
+              ${item.meaning_ja ? `<span>${item.meaning_ja}</span>` : ""}
+              ${item.passage_title ? `<span>${item.passage_title}</span>` : ""}
+              <span>${formatDateTime(item.saved_at)}</span>
+            </div>
+            <details class="vocab-details" data-panel="meaning" data-word-id="${item.id}" ${isPanelOpen("meaning", item.id) ? "open" : ""}>
+              <summary>品詞と意味</summary>
+              ${renderDictionaryEntries(item)}
+            </details>
+            <details class="vocab-details" data-panel="folders" data-word-id="${item.id}" ${isPanelOpen("folders", item.id) ? "open" : ""}>
+              <summary>フォルダ</summary>
+              ${renderFolderCheckboxes(item, folders)}
+            </details>
+            ${(item.example || item.example_translation_ja) ? `
+              <details class="vocab-details" data-panel="example" data-word-id="${item.id}" ${isPanelOpen("example", item.id) ? "open" : ""}>
+                <summary>英文例と日本語訳</summary>
+                ${item.example ? `<p class="note">${item.example}</p>` : '<p class="muted">英文例は未登録です。</p>'}
+                ${item.example_translation_ja ? `<p>${item.example_translation_ja}</p>` : '<p class="muted">日本語訳は未登録です。</p>'}
+              </details>
+            ` : ""}
+          </div>
+          <div class="card-actions">
+            <a class="button" href="reader.html?v=reader-select-20260430&id=${encodeURIComponent(item.passage_id)}">本文へ</a>
+            <button class="button danger" type="button" data-delete-id="${item.id}">削除</button>
+          </div>
+        </article>
+      `).join("");
+    }
+
+    document.addEventListener("click", event => {
+      const deleteButton = event.target.closest("[data-delete-id]");
+      if (deleteButton) {
+        deleteSavedWord(deleteButton.dataset.deleteId);
+        renderWords();
+        return;
+      }
+
+      const folderDeleteButton = event.target.closest("[data-delete-folder]");
+      if (folderDeleteButton) {
+        deleteVocabFolder(folderDeleteButton.dataset.deleteFolder);
+        renderWords();
+      }
+    });
+
+    document.addEventListener("change", event => {
+      const folderToggle = event.target.closest("[data-folder-toggle]");
+      if (folderToggle) {
+        setWordFolderMembership(folderToggle.dataset.wordId, folderToggle.dataset.folderToggle, folderToggle.checked);
+        renderWords();
+      }
+    });
+
+    document.getElementById("folderForm").addEventListener("submit", event => {
+      event.preventDefault();
+      const input = document.getElementById("folderNameInput");
+      const result = createVocabFolder(input.value);
+      input.value = "";
+      renderWords();
+      showMessage(
+        document.getElementById("vocabMessage"),
+        result.created ? "フォルダを作成しました。" : "同名のフォルダがあります。",
+        result.created ? "success" : "info"
+      );
+    });
+
+    document.getElementById("searchInput").addEventListener("input", renderWords);
+    document.getElementById("typeFilter").addEventListener("change", renderWords);
+    document.getElementById("folderFilter").addEventListener("change", renderWords);
+    document.addEventListener("DOMContentLoaded", renderWords);
+  </script>
+</body>
+</html>

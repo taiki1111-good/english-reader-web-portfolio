@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Reader - English Reader Web</title>
+  <link rel="stylesheet" href="css/styles.css?v=reader-select-20260516b" />
+</head>
+<body class="reader-page">
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="site-title" href="index.html">English Reader Web</a>
+      <nav class="site-nav" aria-label="メインナビゲーション">
+        <a href="index.html">教材</a>
+        <a href="vocab.html">単語帳</a>
+        <a href="review.html">復習</a>
+      </nav>
+    </header>
+
+    <main id="readerRoot" aria-live="polite"></main>
+  </div>
+
+  <script src="js/storage.js?v=reader-select-20260516b"></script>
+  <script src="js/app.js?v=reader-select-20260516b"></script>
+  <script>
+    let currentPassage = null;
+    let currentSentences = [];
+    let currentTray = [];
+    let selectedTokens = [];
+    let selectedIdioms = [];
+    let grammarGradeResults = {};
+    let grammarCorrectLabels = {};
+    let activeIdioms = [];
+    let activeTokenContext = null;
+    let holdTimer = null;
+    let touchPopoverOpen = false;
+    let suppressNextClick = false;
+    let touchTokenPressActive = false;
+    let currentActionMode = "both";
+    let currentDisplayMode = "popup";
+    let trayStatusPosition = { x: null, y: null };
+    const ACTION_MODES = {
+      grammar: "grammar",
+      tray: "tray",
+      both: "both",
+      view: "view"
+    };
+    const DISPLAY_MODES = {
+      popup: "popup",
+      bottom: "bottom"
+    };
+    const MOBILE_ACTION_MEDIA = "(max-width: 760px)";
+
+    function isMobileActionViewport() {
+      return window.matchMedia(MOBILE_ACTION_MEDIA).matches;
+    }
+
+    function isGrammarQuizEnabled() {
+      return Boolean(currentPassage?.features?.grammarQuiz);
+    }
+
+    function hasGrammarAnswerData() {
+      return currentSentences.some(sentence => {
+        const answerKey = sentence.answerKey;
+        return answerKey && typeof answerKey === "object" && Object.keys(answerKey).length > 0;
+      });
+    }
+
+    function supportsGrammarUi() {
+      return isGrammarQuizEnabled() || hasGrammarAnswerData();
+    }
+
+    function getAllowedActionModes() {
+      if (supportsGrammarUi()) {
+        return [ACTION_MODES.grammar, ACTION_MODES.tray, ACTION_MODES.both, ACTION_MODES.view];
+      }
+      return [ACTION_MODES.tray, ACTION_MODES.view];
+    }
+
+    function normalizeActionMode(mode) {
+      const allowed = getAllowedActionModes();
+      if (allowed.includes(mode)) {
+        return mode;
+      }
+      return allowed.includes(ACTION_MODES.tray) ? ACTION_MODES.tray : ACTION_MODES.view;
+    }
+
+    function applyActionModeFallbackIfNeeded() {
+      currentActionMode = normalizeActionMode(currentActionMode);
+    }
+
+    function buildWordEntry(token, sentence) {
+      return {
+        word: token.lemma || token.text,
+        type: "word",
+        passage_id: currentPassage.id,
+        passage_title: currentPassage.title,
+        sentence_id: sentence.sentenceId,
+        token_id: token.id,
+        lemma: token.lemma || "",
+        part_of_speech: tokenPartOfSpeech(token),
+        meaning_ja: tokenMeaning(token),
+        dictionary_entries: token.dictionaryEntries || token.dictionary_entries || [],
+        example: sentence.text,
+        example_translation_ja: sentence.translationJa || ""
+      };
+    }
+
+    function buildIdiomEntry(idiom) {
+      const firstTokenId = idiom.tokenIds?.[0] || "";
+      const firstContext = currentSentences
+        .map(sentence => ({ sentence, token: sentence.tokens.find(token => token.id === firstTokenId) }))
+        .find(context => context.token);
+      return {
+        word: idiom.text,
+        type: "idiom",
+        passage_id: currentPassage.id,
+        passage_title: currentPassage.title,
+        sentence_id: firstContext?.sentence.sentenceId || "",
+        token_id: firstTokenId,
+        lemma: idiom.text,
+        part_of_speech: "idiom",
+        meaning_ja: idiom.meaningJa || idiom.meaning_ja || "",
+        dictionary_entries: [],
+        component_words: idiom.text.split(/\s+/),
+        example: firstContext?.sentence.text || "",
+        example_translation_ja: firstContext?.sentence.translationJa || ""
+      };
+    }
+
+    function trayKey(entry) {
+      return [entry.passage_id, entry.type, entry.sentence_id, entry.token_id || entry.word].join("::");
+    }
+
+    function tokenKey(tokenId, sentenceId) {
+      return `${sentenceId}::${tokenId}`;
+    }
+
+    function clearGrammarGradeResults() {
+      grammarGradeResults = {};
+      grammarCorrectLabels = {};
+    }
+
+    function clearGrammarGradeFeedback() {
+      clearGrammarGradeResults();
+      refreshReaderBody();
+      const message = document.getElementById("readerMessage");
+      if (message) {
+        message.innerHTML = "";
+      }
+    }
+
+    function isTokenSelected(tokenId, sentenceId) {
+      const key = tokenKey(tokenId, sentenceId);
+      return selectedTokens.some(item => item.key === key);
+    }
+
+    function isIdiomSelected(idiomId) {
+      return selectedIdioms.includes(idiomId);
+    }
+
+    function toggleSelectedToken(token, sentence) {
+      const key = tokenKey(token.id, sentence.sentenceId);
+      if (selectedTokens.some(item => item.key === key)) {
+        selectedTokens = selectedTokens.filter(item => item.key !== key);
+        return;
+      }
+      selectedTokens.push({
+        key,
+        tokenId: token.id,
+        sentenceId: sentence.sentenceId
+      });
+    }
+
+    function getSelectedContexts() {
+      return selectedTokens
+        .map(item => findToken(item.tokenId, item.sentenceId))
+        .filter(context => context.token && context.sentence);
+    }
+
+    function isGrammarEnabled() {
+      return supportsGrammarUi()
+        && (currentActionMode === ACTION_MODES.grammar || currentActionMode === ACTION_MODES.both);
+    }
+
+    function isTrayEnabled() {
+      return currentActionMode === ACTION_MODES.tray || currentActionMode === ACTION_MODES.both;
+    }
+
+    function isInteractionEnabled() {
+      return currentActionMode !== ACTION_MODES.view;
+    }
+
+    function isPopoverActionMode() {
+      return currentDisplayMode === DISPLAY_MODES.popup;
+    }
+
+    function isBottomActionMode() {
+      return currentDisplayMode === DISPLAY_MODES.bottom;
+    }
+
+    function getActionContexts() {
+      const selectedContexts = getSelectedContexts();
+      if (selectedContexts.length) {
+        return selectedContexts;
+      }
+      return activeTokenContext ? [activeTokenContext] : [];
+    }
+
+    function getIdiomById(idiomId) {
+      return (currentPassage.idioms || []).find(item => item.id === idiomId) || null;
+    }
+
+    function getIdiomTokenIds(idiomIds) {
+      const ids = new Set();
+      idiomIds.forEach(idiomId => {
+        const idiom = getIdiomById(idiomId);
+        (idiom?.tokenIds || []).forEach(tokenId => ids.add(tokenId));
+      });
+      return ids;
+    }
+
+    function applyIdiomHighlights() {
+      const highlightIds = getIdiomTokenIds([...new Set([...activeIdioms, ...selectedIdioms])]);
+      document.querySelectorAll(".token").forEach(button => {
+        const shouldHighlight = highlightIds.has(button.dataset.tokenId);
+        button.classList.toggle("token-idiom-active", shouldHighlight);
+      });
+    }
+
+    function getIdiomsForToken(tokenId) {
+      return (currentPassage.idioms || []).filter(idiom => (idiom.tokenIds || []).includes(tokenId));
+    }
+
+    function renderToken(token, sentence) {
+      const meaning = tokenMeaning(token);
+      const part = tokenPartOfSpeech(token);
+      const isWord = /[A-Za-z0-9]/.test(token.text);
+      const selectedLabel = getGrammarAnswersForPassage(currentPassage.id)[token.id] || "";
+      const isSelected = isTokenSelected(token.id, sentence.sentenceId);
+      const idioms = getIdiomsForToken(token.id);
+      const gradeState = grammarGradeResults[token.id];
+      const gradeClass = gradeState ? ` grammar-${gradeState}` : "";
+      const correctLabels = grammarCorrectLabels[token.id] || "";
+      const showAnswerBadge = gradeState === "incorrect" || gradeState === "unanswered";
+      const answerBadge = showAnswerBadge && correctLabels
+        ? `<span class="grammar-answer-badge" aria-label="正解ラベル">${correctLabels}</span>`
+        : "";
+      if (!isWord) {
+        return `<span class="punct">${token.text}</span>`;
+      }
+      return `
+        <button
+          class="token ${selectedLabel ? "token-labeled" : ""} ${isSelected ? "token-selected" : ""}${gradeClass}"
+          type="button"
+          data-token-id="${token.id}"
+          data-sentence-id="${sentence.sentenceId}"
+          data-grammar-label="${selectedLabel}"
+          title="${[part, meaning, idioms.map(idiom => idiom.text).join(" / ")].filter(Boolean).join(" / ")}"
+        >${token.text}${selectedLabel ? `<span class="token-label">${selectedLabel}</span>` : ""}${answerBadge}</button>
+      `;
+    }
+
+    function renderSentence(sentence, index) {
+      const tokenHtml = sentence.tokens.map((token, tokenIndex) => {
+        const prefix = shouldSpaceBefore(token.text, sentence.tokens[tokenIndex - 1]?.text) ? " " : "";
+        return prefix + renderToken(token, sentence);
+      }).join("");
+
+      return `
+        <article class="sentence-card">
+          <div class="sentence-head">
+            <span>Sentence ${index + 1}</span>
+            ${sentence.sentencePattern ? `<strong>${sentence.sentencePattern}</strong>` : ""}
+          </div>
+          <p class="sentence-text">${tokenHtml}</p>
+          ${sentence.translationJa ? `<details class="translation-details"><summary>日本語訳</summary><p>${sentence.translationJa}</p></details>` : ""}
+        </article>
+      `;
+    }
+
+    function renderTray() {
+      const trayItems = currentTray.map(entry => `
+        <span class="tray-item">
+          ${entry.word}
+          <button type="button" aria-label="${entry.word} をtrayから削除" data-remove-tray="${trayKey(entry)}">×</button>
+        </span>
+      `).join("");
+      return `
+        <section id="wordTraySection" class="word-tray" aria-label="単語帳保存前のtray">
+          <div class="tray-head">
+            <h2>Tray</h2>
+            <div class="tray-actions">
+              <button class="button danger" id="clearTrayButton" type="button" ${currentTray.length ? "" : "disabled"}>全削除</button>
+              <button class="button primary" id="saveTrayButton" type="button" ${currentTray.length ? "" : "disabled"}>単語帳に保存</button>
+            </div>
+          </div>
+          <div class="tray-list">${trayItems || '<span class="muted">「trayに入れる」した語句がここに入ります。</span>'}</div>
+        </section>
+      `;
+    }
+
+    function renderTrayStatusBar() {
+      if (isBottomActionMode() && selectedTokens.length) {
+        return "";
+      }
+      const count = currentTray.length;
+      const latest = count ? currentTray[count - 1].word : "";
+      const latestText = latest.length > 24 ? `${latest.slice(0, 24)}...` : latest;
+      return `
+        <section class="tray-status-bar ${count ? "has-items" : "is-empty"}" aria-label="tray状態">
+          <div class="tray-status-main">
+            <p class="tray-status-count">Tray ${count}件</p>
+            <p class="tray-status-latest">${count ? `最新: ${latestText}` : "最新: なし"}</p>
+          </div>
+          <div class="tray-status-actions">
+            <button class="button" id="trayStatusViewButton" type="button">Trayを見る</button>
+            ${count ? '<button class="button primary" id="trayStatusSaveButton" type="button">保存</button>' : ""}
+          </div>
+        </section>
+      `;
+    }
+
+    function renderMobileActionBar() {
+      if (!isBottomActionMode() || !selectedTokens.length || currentActionMode === ACTION_MODES.view) {
+        return "";
+      }
+      const selectedContexts = getSelectedContexts();
+      const firstWord = selectedContexts[0]?.token?.lemma || selectedContexts[0]?.token?.text || "";
+      const shortWord = firstWord.length > 18 ? `${firstWord.slice(0, 18)}...` : firstWord;
+      const summary = selectedTokens.length === 1
+        ? `1語を選択中: ${shortWord}`
+        : `${selectedTokens.length}語を選択中`;
+      const grammarButtons = supportsGrammarUi() && isGrammarEnabled()
+        ? `${GRAMMAR_LABELS.map(label => `<button class="grammar-pill" type="button" data-mobile-action="label" data-mobile-label="${label}">${label}</button>`).join("")}
+            <button class="button" type="button" data-mobile-action="clear">clear</button>`
+        : "";
+      const saveButton = isTrayEnabled()
+        ? '<button class="button primary" type="button" data-mobile-action="save">trayに入れる</button>'
+        : "";
+      return `
+        <section class="mobile-action-bar" aria-label="下部固定語句操作バー">
+          <p class="mobile-action-summary">${summary}</p>
+          <div class="mobile-action-buttons">
+            ${grammarButtons}
+            ${saveButton}
+            <button class="button danger" type="button" data-mobile-action="unselect">選択解除</button>
+          </div>
+        </section>
+      `;
+    }
+
+    function applyTrayStatusPosition() {
+      const bar = document.querySelector(".tray-status-bar");
+      if (!bar) {
+        return;
+      }
+      if (trayStatusPosition.x == null || trayStatusPosition.y == null) {
+        return;
+      }
+      const maxX = Math.max(0, window.innerWidth - bar.offsetWidth);
+      const maxY = Math.max(0, window.innerHeight - bar.offsetHeight);
+      bar.style.left = `${Math.min(Math.max(0, trayStatusPosition.x), maxX)}px`;
+      bar.style.top = `${Math.min(Math.max(0, trayStatusPosition.y), maxY)}px`;
+      bar.style.right = "auto";
+      bar.style.bottom = "auto";
+    }
+
+    function enableTrayStatusDrag() {
+      const bar = document.querySelector(".tray-status-bar");
+      if (!bar || bar.dataset.dragReady === "1") {
+        return;
+      }
+      bar.dataset.dragReady = "1";
+      bar.addEventListener("pointerdown", event => {
+        if (event.target.closest("button")) {
+          return;
+        }
+        const rect = bar.getBoundingClientRect();
+        const offsetX = event.clientX - rect.left;
+        const offsetY = event.clientY - rect.top;
+        bar.classList.add("is-dragging");
+        bar.setPointerCapture(event.pointerId);
+        const onMove = moveEvent => {
+          const maxX = Math.max(0, window.innerWidth - bar.offsetWidth);
+          const maxY = Math.max(0, window.innerHeight - bar.offsetHeight);
+          const x = Math.min(Math.max(0, moveEvent.clientX - offsetX), maxX);
+          const y = Math.min(Math.max(0, moveEvent.clientY - offsetY), maxY);
+          trayStatusPosition = { x, y };
+          bar.style.left = `${x}px`;
+          bar.style.top = `${y}px`;
+          bar.style.right = "auto";
+          bar.style.bottom = "auto";
+        };
+        const onUp = upEvent => {
+          bar.classList.remove("is-dragging");
+          bar.removeEventListener("pointermove", onMove);
+          bar.removeEventListener("pointerup", onUp);
+          bar.removeEventListener("pointercancel", onUp);
+          if (bar.hasPointerCapture(upEvent.pointerId)) {
+            bar.releasePointerCapture(upEvent.pointerId);
+          }
+        };
+        bar.addEventListener("pointermove", onMove);
+        bar.addEventListener("pointerup", onUp);
+        bar.addEventListener("pointercancel", onUp);
+      });
+    }
+
+    function renderReader() {
+      const root = document.getElementById("readerRoot");
+      const readPassages = getReadPassages();
+      applyActionModeFallbackIfNeeded();
+      const grammarUiEnabled = supportsGrammarUi();
+      const hasGradeResults = grammarUiEnabled && Object.keys(grammarGradeResults).length > 0;
+      if (!grammarUiEnabled) {
+        clearGrammarGradeResults();
+      }
+      const source = currentPassage.source_url
+        ? `<a href="${currentPassage.source_url}" target="_blank" rel="noreferrer">${currentPassage.source}</a>`
+        : currentPassage.source;
+      const actionModeOptions = [
+        { value: ACTION_MODES.grammar, label: "文型選択のみ" },
+        { value: ACTION_MODES.tray, label: "tray追加のみ" },
+        { value: ACTION_MODES.both, label: "両方" },
+        { value: ACTION_MODES.view, label: "閲覧のみ" }
+      ].filter(option => getAllowedActionModes().includes(option.value));
+      root.innerHTML = `
+        <section class="reader-header">
+          <div>
+            <p class="eyebrow">${currentPassage.level_hint || "CEFR"} / ${getDifficultyLabel(currentPassage.difficulty)} / ${getWordCount(currentPassage)}語</p>
+            <h1>${currentPassage.title}</h1>
+            <p>${currentPassage.summary_ja || ""}</p>
+            <div class="meta-row">
+              ${(currentPassage.tags || []).map(tag => `<span>#${tag.replace(/^#/, "")}</span>`).join("")}
+              <span>出典: ${source || "Original Sample"}</span>
+              <span>${currentPassage.license_type || ""}</span>
+            </div>
+          </div>
+          <div class="reader-actions">
+            <button class="button primary" id="markReadButton" type="button">${readPassages[currentPassage.id]?.read ? "既読を解除" : "既読にする"}</button>
+            ${grammarUiEnabled ? '<button class="button" id="gradeAnsweredButton" type="button">選択済みだけ採点</button>' : ""}
+            ${grammarUiEnabled ? '<button class="button" id="gradeAllButton" type="button">全体を採点</button>' : ""}
+            ${hasGradeResults ? '<button class="button ghost" id="clearGradeResultsButton" type="button">採点結果を消す</button>' : ""}
+          </div>
+        </section>
+        <section class="layout-two">
+          <div>
+            <div class="reader-mode reader-mode-inline">
+              <label>
+                語句操作モード
+                <select id="actionModeSelect">
+                  ${actionModeOptions.map(option => `<option value="${option.value}" ${currentActionMode === option.value ? "selected" : ""}>${option.label}</option>`).join("")}
+                </select>
+              </label>
+              <label>
+                操作表示モード
+                <select id="displayModeSelect">
+                  <option value="popup" ${currentDisplayMode === DISPLAY_MODES.popup ? "selected" : ""}>ポップアップ</option>
+                  <option value="bottom" ${currentDisplayMode === DISPLAY_MODES.bottom ? "selected" : ""}>下部固定</option>
+                </select>
+              </label>
+            </div>
+            ${currentSentences.map(renderSentence).join("")}
+            ${renderTray()}
+          </div>
+          <aside class="side-panel">
+            <h2>使い方</h2>
+            <p>語句操作モードで実行できる操作を選び、操作表示モードでポップアップまたは下部固定バーを選べます。単語をクリックまたはタップすると複数選択でき、実行後は選択状態が自動解除されます。</p>
+            <div id="readerMessage"></div>
+          </aside>
+        </section>
+        ${renderTrayStatusBar()}
+        ${renderMobileActionBar()}
+        <div id="tokenPopover" class="token-popover" role="dialog" aria-label="語句操作" hidden></div>
+      `;
+      document.body.classList.toggle("mobile-action-active", isBottomActionMode() && selectedTokens.length > 0);
+      applyIdiomHighlights();
+      applyTrayStatusPosition();
+      enableTrayStatusDrag();
+    }
+
+    function findToken(tokenId, sentenceId) {
+      const sentence = currentSentences.find(item => item.sentenceId === sentenceId);
+      return {
+        sentence,
+        token: sentence?.tokens.find(token => token.id === tokenId)
+      };
+    }
+
+    function closeTokenPopover() {
+      const popover = document.getElementById("tokenPopover");
+      if (popover) {
+        popover.hidden = true;
+      }
+      activeIdioms = [];
+      applyIdiomHighlights();
+      activeTokenContext = null;
+    }
+
+    function openTokenPopover(tokenButton) {
+      if (!isInteractionEnabled() || !isPopoverActionMode()) {
+        closeTokenPopover();
+        return;
+      }
+      const { token, sentence } = findToken(tokenButton.dataset.tokenId, tokenButton.dataset.sentenceId);
+      if (!token || !sentence) {
+        return;
+      }
+      activeTokenContext = { token, sentence, button: tokenButton };
+      const selectedLabel = getGrammarAnswersForPassage(currentPassage.id)[token.id] || "";
+      const targetCount = getActionContexts().length || 1;
+      const selectionStatus = targetCount > 1
+        ? `<p class="popover-status">${targetCount}語を選択中</p>`
+        : "";
+      const idioms = getIdiomsForToken(token.id);
+      activeIdioms = idioms.map(item => item.id);
+      applyIdiomHighlights();
+      const idiomSelectionStatus = selectedIdioms.length
+        ? `<p class="popover-status">${selectedIdioms.length}件の熟語を選択中</p>`
+        : "";
+      const idiomHint = idioms.length && isTrayEnabled()
+        ? `<div class="idiom-hints">${idioms.map(idiom => `
+            <button class="idiom-save ${isIdiomSelected(idiom.id) ? "selected" : ""}" type="button" data-popover-idiom="${idiom.id}">
+              <strong>${idiom.text}</strong>
+            </button>
+          `).join("")}</div>`
+        : "";
+      const popover = document.getElementById("tokenPopover");
+      const labelButtons = `
+        <div class="popover-labels" aria-label="文型ラベル">
+          ${GRAMMAR_LABELS.map(label => `<button class="grammar-pill ${selectedLabel === label ? "selected" : ""}" type="button" data-popover-label="${label}">${label}</button>`).join("")}
+        </div>
+      `;
+      const clearButton = '<button class="button" type="button" data-popover-clear>clear</button>';
+      const saveButton = '<button class="button primary" type="button" data-popover-save>trayに入れる</button>';
+      const renderPopoverContent = below => {
+        const actions = [];
+        if (isGrammarEnabled()) {
+          actions.push(labelButtons, clearButton);
+        }
+        if (isTrayEnabled()) {
+          actions.push(saveButton);
+        }
+        popover.innerHTML = below
+          ? `${selectionStatus}${idiomSelectionStatus}${idiomHint}${actions.join("")}`
+          : `${selectionStatus}${idiomSelectionStatus}${actions.reverse().join("")}${idiomHint}`;
+      };
+      renderPopoverContent(true);
+      popover.hidden = false;
+
+      const rect = tokenButton.getBoundingClientRect();
+      let popoverRect = popover.getBoundingClientRect();
+      const viewportMargin = 8;
+      const spaceBelow = window.innerHeight - rect.bottom - viewportMargin;
+      const below = spaceBelow >= popoverRect.height + viewportMargin;
+      renderPopoverContent(below);
+      popoverRect = popover.getBoundingClientRect();
+      const left = Math.min(
+        Math.max(viewportMargin, rect.left + rect.width / 2 - popoverRect.width / 2),
+        window.innerWidth - popoverRect.width - viewportMargin
+      );
+      const preferredTop = below
+        ? rect.bottom + 8
+        : rect.top - popoverRect.height - 8;
+      const top = Math.min(
+        Math.max(viewportMargin, preferredTop),
+        window.innerHeight - popoverRect.height - viewportMargin
+      );
+      popover.classList.toggle("is-below", below);
+      popover.classList.toggle("is-above", !below);
+      popover.style.left = `${left}px`;
+      popover.style.top = `${top}px`;
+      const arrowLeft = Math.min(
+        Math.max(16, rect.left + rect.width / 2 - left),
+        popoverRect.width - 16
+      );
+      popover.style.setProperty("--popover-arrow-left", `${arrowLeft}px`);
+    }
+
+    function refreshReaderBody() {
+      renderReader();
+      closeTokenPopover();
+      applyIdiomHighlights();
+    }
+
+    function clearSelectedTokens() {
+      selectedTokens = [];
+    }
+
+    function clearSelectedIdioms() {
+      selectedIdioms = [];
+    }
+
+    function addActionContextsToTray() {
+      const contexts = getActionContexts();
+      if (!contexts.length) {
+        return;
+      }
+      let added = 0;
+      let skipped = 0;
+      contexts.forEach(context => {
+        const entry = buildWordEntry(context.token, context.sentence);
+        const key = trayKey(entry);
+        if (!currentTray.some(item => trayKey(item) === key)) {
+          currentTray.push(entry);
+          added += 1;
+        } else {
+          skipped += 1;
+        }
+      });
+      const message = `trayに追加しました。追加 ${added} 件 / 追加済み ${skipped} 件。`;
+      let type = "info";
+      if (added) {
+        type = "success";
+      }
+      clearSelectedTokens();
+      refreshReaderBody();
+      showMessage(document.getElementById("readerMessage"), message, type);
+    }
+
+    function saveTrayToVocabulary() {
+      if (!currentTray.length) {
+        return;
+      }
+      let created = 0;
+      let existing = 0;
+      currentTray.forEach(entry => {
+        const result = saveWordIfNew(entry);
+        if (result.created) {
+          created += 1;
+        } else {
+          existing += 1;
+        }
+      });
+      currentTray = [];
+      renderReader();
+      showMessage(
+        document.getElementById("readerMessage"),
+        `単語帳へ保存しました。追加 ${created} 件 / 保存済み ${existing} 件。`,
+        "success"
+      );
+    }
+
+    function toggleSelectedIdiom(idiomId) {
+      if (isIdiomSelected(idiomId)) {
+        selectedIdioms = selectedIdioms.filter(id => id !== idiomId);
+        return;
+      }
+      selectedIdioms.push(idiomId);
+    }
+
+    function addSelectedIdiomsToTray() {
+      if (!selectedIdioms.length) {
+        return false;
+      }
+      let added = 0;
+      let skipped = 0;
+      selectedIdioms.forEach(idiomId => {
+        const idiom = getIdiomById(idiomId);
+        if (!idiom) {
+          return;
+        }
+        const entry = buildIdiomEntry(idiom);
+        if (!currentTray.some(item => trayKey(item) === trayKey(entry))) {
+          currentTray.push(entry);
+          added += 1;
+        } else {
+          skipped += 1;
+        }
+      });
+      clearSelectedIdioms();
+      clearSelectedTokens();
+      refreshReaderBody();
+      showMessage(document.getElementById("readerMessage"), `熟語をtrayに追加しました。追加 ${added} 件 / 追加済み ${skipped} 件。`, added ? "success" : "info");
+      if (!added && !skipped) {
+        return false;
+      }
+      return true;
+    }
+
+    function setLabelForActionContexts(label) {
+      const contexts = getActionContexts();
+      contexts.forEach(context => {
+        setGrammarAnswer(currentPassage.id, context.token.id, label);
+      });
+      clearGrammarGradeResults();
+      clearSelectedTokens();
+      refreshReaderBody();
+    }
+
+    function clearLabelForActionContexts() {
+      setLabelForActionContexts("");
+    }
+
+    function executePopoverAction(action) {
+      if (!action) {
+        return false;
+      }
+      const label = action.closest("[data-popover-label]");
+      if (label) {
+        if (!isGrammarEnabled()) {
+          return false;
+        }
+        setLabelForActionContexts(label.dataset.popoverLabel);
+        return true;
+      }
+      if (action.closest("[data-popover-clear]")) {
+        if (!isGrammarEnabled()) {
+          return false;
+        }
+        clearLabelForActionContexts();
+        return true;
+      }
+      if (action.closest("[data-popover-save]")) {
+        if (!isTrayEnabled()) {
+          return false;
+        }
+        if (selectedIdioms.length) {
+          addSelectedIdiomsToTray();
+          return true;
+        }
+        addActionContextsToTray();
+        return true;
+      }
+      const idiomButton = action.closest("[data-popover-idiom]");
+      if (idiomButton) {
+        if (!isTrayEnabled()) {
+          return false;
+        }
+        toggleSelectedIdiom(idiomButton.dataset.popoverIdiom);
+        if (activeTokenContext?.button) {
+          openTokenPopover(activeTokenContext.button);
+        }
+        return true;
+      }
+      return false;
+    }
+
+    function collectGrammarTargets() {
+      const targets = [];
+      currentSentences.forEach(sentence => {
+        const answerKey = sentence.answerKey || {};
+        Object.entries(answerKey).forEach(([tokenId, labels]) => {
+          targets.push({ tokenId, labels });
+        });
+      });
+      return targets;
+    }
+
+    function gradeGrammar(scope = "all") {
+      const answers = getGrammarAnswersForPassage(currentPassage.id);
+      const allTargets = collectGrammarTargets();
+      clearGrammarGradeResults();
+      if (!allTargets.length) {
+        refreshReaderBody();
+        showMessage(document.getElementById("readerMessage"), "この教材には採点用の文型データがありません。", "info");
+        return;
+      }
+      const targets = scope === "answered"
+        ? allTargets.filter(target => Boolean(answers[target.tokenId]))
+        : allTargets;
+      if (scope === "answered" && !targets.length) {
+        refreshReaderBody();
+        showMessage(document.getElementById("readerMessage"), "文型ラベルを選択済みの語句がありません。", "info");
+        return;
+      }
+      let correct = 0;
+      targets.forEach(target => {
+        const selectedLabel = answers[target.tokenId];
+        grammarCorrectLabels[target.tokenId] = target.labels.join("/");
+        if (!selectedLabel) {
+          grammarGradeResults[target.tokenId] = "unanswered";
+          return;
+        }
+        if (target.labels.includes(selectedLabel)) {
+          grammarGradeResults[target.tokenId] = "correct";
+          correct += 1;
+          return;
+        }
+        grammarGradeResults[target.tokenId] = "incorrect";
+      });
+      const total = targets.length;
+      const text = scope === "answered"
+        ? `選択済み ${total}件中 ${correct}件正解です。`
+        : `全体 ${total}件中 ${correct}件正解です。`;
+      refreshReaderBody();
+      showMessage(document.getElementById("readerMessage"), text, correct === total ? "success" : "info");
+    }
+
+    async function init() {
+      const root = document.getElementById("readerRoot");
+      try {
+        const passages = await fetchJson("data/passages.json");
+        const requestedId = parseQuery().get("id") || getLastOpenedPassage()?.passage_id || passages[0]?.id;
+        currentPassage = passages.find(passage => passage.id === requestedId) || passages[0];
+        currentSentences = buildSentenceList(currentPassage);
+        clearGrammarGradeResults();
+        applyActionModeFallbackIfNeeded();
+        currentDisplayMode = isMobileActionViewport() ? DISPLAY_MODES.bottom : DISPLAY_MODES.popup;
+        setLastOpenedPassage(currentPassage.id);
+        renderReader();
+      } catch (error) {
+        showMessage(root, error.message, "error");
+      }
+    }
+
+    document.addEventListener("click", event => {
+      const bypassSuppressTarget = event.target.closest(
+        "#trayStatusViewButton, #trayStatusSaveButton, #saveTrayButton, #clearTrayButton, [data-remove-tray]"
+      );
+      if (suppressNextClick && !bypassSuppressTarget) {
+        suppressNextClick = false;
+        return;
+      }
+      suppressNextClick = false;
+
+      const mobileAction = event.target.closest("[data-mobile-action]");
+      if (mobileAction) {
+        if (mobileAction.dataset.mobileAction === "label") {
+          if (isGrammarEnabled()) {
+            setLabelForActionContexts(mobileAction.dataset.mobileLabel);
+          }
+          return;
+        }
+        if (mobileAction.dataset.mobileAction === "clear") {
+          if (isGrammarEnabled()) {
+            clearLabelForActionContexts();
+          }
+          return;
+        }
+        if (mobileAction.dataset.mobileAction === "save") {
+          if (isTrayEnabled()) {
+            addActionContextsToTray();
+          }
+          return;
+        }
+        if (mobileAction.dataset.mobileAction === "unselect") {
+          clearSelectedTokens();
+          closeTokenPopover();
+          renderReader();
+          return;
+        }
+      }
+
+      const tokenButton = event.target.closest(".token");
+      if (tokenButton) {
+        if (!isInteractionEnabled()) {
+          closeTokenPopover();
+          return;
+        }
+        const { token, sentence } = findToken(tokenButton.dataset.tokenId, tokenButton.dataset.sentenceId);
+        if (token && sentence) {
+          toggleSelectedToken(token, sentence);
+          renderReader();
+          if (isPopoverActionMode()) {
+            const refreshedButton = document.querySelector(`[data-token-id="${CSS.escape(token.id)}"][data-sentence-id="${CSS.escape(sentence.sentenceId)}"]`);
+            if (refreshedButton) {
+              openTokenPopover(refreshedButton);
+            }
+          } else {
+            closeTokenPopover();
+          }
+        }
+        return;
+      }
+
+      if (event.target.closest("[data-popover-label], [data-popover-clear], [data-popover-save], [data-popover-idiom]")) {
+        executePopoverAction(event.target);
+        return;
+      }
+
+      const popover = event.target.closest(".token-popover");
+      if (popover) {
+        return;
+      }
+
+      const activeTokenButton = event.target.closest(".token");
+      if (activeTokenButton) {
+        openTokenPopover(activeTokenButton);
+        return;
+      }
+
+      const removeButton = event.target.closest("[data-remove-tray]");
+      if (removeButton) {
+        currentTray = currentTray.filter(entry => trayKey(entry) !== removeButton.dataset.removeTray);
+        renderReader();
+        return;
+      }
+
+      if (event.target.id === "saveTrayButton") {
+        saveTrayToVocabulary();
+        return;
+      }
+
+      if (event.target.id === "trayStatusSaveButton") {
+        saveTrayToVocabulary();
+        return;
+      }
+
+      if (event.target.id === "trayStatusViewButton") {
+        const tray = document.getElementById("wordTraySection");
+        if (tray) {
+          tray.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        return;
+      }
+
+      if (event.target.id === "clearTrayButton") {
+        currentTray = [];
+        renderReader();
+        return;
+      }
+
+      if (event.target.id === "markReadButton") {
+        const isRead = Boolean(getReadPassages()[currentPassage.id]?.read);
+        setReadPassage(currentPassage.id, !isRead);
+        renderReader();
+        return;
+      }
+
+      if (event.target.id === "gradeAnsweredButton") {
+        gradeGrammar("answered");
+        return;
+      }
+
+      if (event.target.id === "gradeAllButton") {
+        gradeGrammar("all");
+        return;
+      }
+
+      if (event.target.id === "clearGradeResultsButton") {
+        clearGrammarGradeFeedback();
+        return;
+      }
+
+      if (!event.target.closest(".token-popover")) {
+        closeTokenPopover();
+      }
+    });
+
+    document.addEventListener("pointerover", event => {
+      if (event.pointerType !== "mouse") {
+        return;
+      }
+      if (!isInteractionEnabled() || !isPopoverActionMode()) {
+        return;
+      }
+      const tokenButton = event.target.closest(".token");
+      if (!tokenButton) {
+        return;
+      }
+      openTokenPopover(tokenButton);
+    });
+
+    document.addEventListener("pointerdown", event => {
+      window.clearTimeout(holdTimer);
+      touchTokenPressActive = false;
+      touchPopoverOpen = false;
+    });
+
+    document.addEventListener("pointerup", () => {
+      window.clearTimeout(holdTimer);
+      touchTokenPressActive = false;
+      touchPopoverOpen = false;
+    });
+
+    document.addEventListener("pointercancel", () => {
+      window.clearTimeout(holdTimer);
+      touchPopoverOpen = false;
+      touchTokenPressActive = false;
+      closeTokenPopover();
+    });
+
+    window.addEventListener("resize", () => {
+      if (isBottomActionMode()) {
+        closeTokenPopover();
+      }
+      applyTrayStatusPosition();
+    });
+
+    document.addEventListener("change", event => {
+      if (event.target.id === "actionModeSelect") {
+        currentActionMode = normalizeActionMode(event.target.value);
+        clearGrammarGradeResults();
+        clearSelectedTokens();
+        clearSelectedIdioms();
+        closeTokenPopover();
+        renderReader();
+        return;
+      }
+      if (event.target.id === "displayModeSelect") {
+        currentDisplayMode = event.target.value;
+        clearSelectedTokens();
+        clearSelectedIdioms();
+        closeTokenPopover();
+        renderReader();
+      }
+    });
+
+    document.addEventListener("DOMContentLoaded", init);
+  </script>
+</body>
+</html>

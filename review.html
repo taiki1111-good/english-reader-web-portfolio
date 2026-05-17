@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Memorization Sheet - English Reader Web</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="site-title" href="index.html">English Reader Web</a>
+      <nav class="site-nav" aria-label="メインナビゲーション">
+        <a href="index.html">教材</a>
+        <a href="vocab.html">単語帳</a>
+        <a aria-current="page" href="review.html">復習</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="section-head">
+        <div>
+          <p class="eyebrow">Memorization sheet</p>
+          <h1>暗記シート</h1>
+        </div>
+        <div class="card-actions">
+          <a class="button" href="flashcard.html">フラッシュカード</a>
+          <a class="button" href="vocab.html">単語帳へ</a>
+        </div>
+      </section>
+
+      <section class="toolbar">
+        <label>
+          対象
+          <select id="folderFilter">
+            <option value="all">全単語</option>
+          </select>
+        </label>
+        <label>
+          隠す面
+          <select id="maskMode">
+            <option value="meaning">意味を隠す</option>
+            <option value="word">英単語を隠す</option>
+          </select>
+        </label>
+      </section>
+
+      <section id="sheetList" class="sheet-grid" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <script src="js/storage.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    const revealedCards = new Set();
+    const POS_LABELS_JA = {
+      noun: "名詞",
+      verb: "動詞",
+      adjective: "形容詞",
+      adverb: "副詞",
+      pronoun: "代名詞",
+      preposition: "前置詞",
+      conjunction: "接続詞",
+      interjection: "間投詞",
+      determiner: "限定詞",
+      article: "冠詞",
+      auxiliary: "助動詞",
+      modal: "助動詞",
+      particle: "助詞",
+      idiom: "熟語"
+    };
+
+    function toPartOfSpeechJa(value) {
+      const normalized = String(value || "").trim().toLowerCase();
+      if (!normalized) {
+        return "";
+      }
+      return POS_LABELS_JA[normalized] || value;
+    }
+
+    function getDictionaryEntriesForDisplay(item) {
+      const merged = new Map();
+      const rawEntries = Array.isArray(item.dictionary_entries) ? item.dictionary_entries : [];
+
+      function addEntry(part, meanings) {
+        const normalizedPart = String(part || "").trim();
+        const normalizedMeanings = (Array.isArray(meanings) ? meanings : [meanings])
+          .map(meaning => String(meaning || "").trim())
+          .filter(Boolean);
+        if (!normalizedPart || !normalizedMeanings.length) {
+          return;
+        }
+        const existing = merged.get(normalizedPart) || new Set();
+        normalizedMeanings.forEach(meaning => existing.add(meaning));
+        merged.set(normalizedPart, existing);
+      }
+
+      rawEntries.forEach(entry => {
+        const item = entry || {};
+        addEntry(item.partOfSpeech || item.part_of_speech, item.meaningsJa || item.meanings_ja || item.meaningJa || item.meaning_ja);
+      });
+      addEntry(item.part_of_speech, item.meaning_ja);
+
+      const primaryPart = String(item.part_of_speech || "").trim().toLowerCase();
+      return [...merged.entries()].map(([partOfSpeech, meanings]) => ({
+        partOfSpeech,
+        partOfSpeechJa: toPartOfSpeechJa(partOfSpeech),
+        meaningsJa: [...meanings]
+      })).sort((left, right) => {
+        const leftPrimary = String(left.partOfSpeech || "").trim().toLowerCase() === primaryPart;
+        const rightPrimary = String(right.partOfSpeech || "").trim().toLowerCase() === primaryPart;
+        if (leftPrimary === rightPrimary) {
+          return 0;
+        }
+        return leftPrimary ? -1 : 1;
+      });
+    }
+
+    function renderFolderOptions() {
+      const folders = getVocabFolders();
+      const current = document.getElementById("folderFilter").value;
+      document.getElementById("folderFilter").innerHTML = `
+        <option value="all">全単語</option>
+        ${folders.map(folder => `<option value="${folder.id}">${folder.name}</option>`).join("")}
+      `;
+      document.getElementById("folderFilter").value = ["all", ...folders.map(folder => folder.id)].includes(current) ? current : "all";
+    }
+
+    function renderDictionaryList(entries) {
+      if (!entries.length) {
+        return '<p class="muted">意味は未登録です。</p>';
+      }
+      return `
+        <ul class="dictionary-list dictionary-list-vertical">
+          ${entries.map(entry => `<li><strong>${entry.partOfSpeechJa || entry.partOfSpeech}</strong><span>${entry.meaningsJa.join("、")}</span></li>`).join("")}
+        </ul>
+      `;
+    }
+
+    function renderSheetCard(item, mode) {
+      const revealed = revealedCards.has(item.id);
+      const wordText = item.word || item.lemma || "";
+      const dictionaryEntries = getDictionaryEntriesForDisplay(item);
+      const meaningHidden = mode === "meaning" && !revealed;
+      const wordHidden = mode === "word" && !revealed;
+      const tapHint = revealed ? "タップして隠す" : "タップして表示";
+      const partMeaningSection = (revealed || wordHidden) && !meaningHidden
+        ? renderDictionaryList(dictionaryEntries)
+        : "";
+      const exampleEnglish = revealed && item.example
+        ? `<p class="note">${item.example}</p>`
+        : "";
+      const exampleTranslation = revealed && item.example_translation_ja
+        ? `<p>${item.example_translation_ja}</p>`
+        : "";
+      return `
+        <article class="sheet-card ${revealed ? "is-revealed" : ""}" role="button" tabindex="0" data-sheet-id="${item.id}">
+          <p class="eyebrow">${item.type === "idiom" ? "熟語" : "単語"}</p>
+          <h2 class="${wordHidden ? "masked" : ""}">${wordHidden ? "••••••" : wordText}</h2>
+          ${partMeaningSection}
+          <p class="sheet-meaning masked">${tapHint}</p>
+          ${exampleEnglish}
+          ${exampleTranslation}
+          ${item.passage_id ? `<a class="button" href="reader.html?id=${encodeURIComponent(item.passage_id)}">本文へ</a>` : ""}
+        </article>
+      `;
+    }
+
+    function renderSheet() {
+      renderFolderOptions();
+      const root = document.getElementById("sheetList");
+      const folder = document.getElementById("folderFilter").value;
+      const mode = document.getElementById("maskMode").value;
+      const totalSavedWords = getSavedWords();
+      const words = totalSavedWords.filter(item => {
+        const folderIds = Array.isArray(item.folder_ids) ? item.folder_ids : [];
+        return folder === "all" || folderIds.includes(folder);
+      });
+      root.className = "sheet-grid";
+
+      if (!words.length) {
+        if (!totalSavedWords.length) {
+          root.innerHTML = `
+            <div class="message message-info">
+              <p>復習する語句がまだありません。</p>
+              <p>まず reader で語句を save し、tray から単語帳へ保存してください。</p>
+              <div class="empty-actions">
+                <a class="button" href="index.html">教材一覧へ</a>
+                <a class="button" href="vocab.html">単語帳へ</a>
+              </div>
+            </div>
+          `;
+        } else {
+          root.innerHTML = `
+            <div class="message message-info">
+              <p>この条件で表示できる語句がありません。</p>
+              <p>対象フォルダを見直すか、単語帳で語句を追加してください。</p>
+              <div class="empty-actions">
+                <a class="button" href="vocab.html">単語帳へ</a>
+              </div>
+            </div>
+          `;
+        }
+        return;
+      }
+
+      root.innerHTML = words.map(item => renderSheetCard(item, mode)).join("");
+    }
+
+    function toggleCard(card) {
+      const id = card.dataset.sheetId;
+      if (revealedCards.has(id)) {
+        revealedCards.delete(id);
+      } else {
+        revealedCards.add(id);
+      }
+      renderSheet();
+    }
+
+    document.addEventListener("click", event => {
+      if (event.target.closest("a")) {
+        return;
+      }
+      const card = event.target.closest("[data-sheet-id]");
+      if (card) {
+        toggleCard(card);
+      }
+    });
+
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      const card = event.target.closest("[data-sheet-id]");
+      if (card) {
+        event.preventDefault();
+        toggleCard(card);
+      }
+    });
+
+    document.getElementById("folderFilter").addEventListener("change", () => {
+      revealedCards.clear();
+      renderSheet();
+    });
+    document.getElementById("maskMode").addEventListener("change", () => {
+      revealedCards.clear();
+      renderSheet();
+    });
+    document.addEventListener("DOMContentLoaded", renderSheet);
+  </script>
+</body>
+</html>
