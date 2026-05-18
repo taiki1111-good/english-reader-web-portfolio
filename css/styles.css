@@ -1052,8 +1052,6 @@ select {
 
 .flash-study-card,
 .flash-focus-card {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
   width: 100%;
   min-height: 430px;
   border: 1px solid #cbd8d6;
@@ -1061,6 +1059,16 @@ select {
   box-shadow: 0 12px 28px rgba(24, 45, 44, 0.13);
   overflow: hidden;
   cursor: pointer;
+}
+
+.flash-study-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.flash-focus-card {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .flash-study-card.face-word,
@@ -1108,6 +1116,29 @@ select {
 
 .flash-study-nav-row .button {
   width: 100%;
+}
+
+.flash-card-nav {
+  margin-top: auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 20px 20px;
+}
+
+.flash-card-nav .button {
+  width: 100%;
+}
+
+.flash-study-card.face-meaning .flash-card-nav .button {
+  color: #fff;
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
+.flash-study-card.face-meaning .flash-card-nav .button:hover {
+  border-color: var(--primary-strong);
+  background: var(--primary-strong);
 }
 
 .flashcard-strip {

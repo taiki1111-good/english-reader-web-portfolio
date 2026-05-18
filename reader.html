@@ -160,11 +160,57 @@
       return selectedIdioms.includes(idiomId);
     }
 
+    function isSelectableToken(token) {
+      return !!token && /[A-Za-z0-9]/.test(token.text || "");
+    }
+
+    function getSelectableTokenIndex(sentence, tokenId) {
+      if (!sentence || !Array.isArray(sentence.tokens)) {
+        return -1;
+      }
+      let selectableIndex = -1;
+      for (const token of sentence.tokens) {
+        if (!isSelectableToken(token)) {
+          continue;
+        }
+        selectableIndex += 1;
+        if (token.id === tokenId) {
+          return selectableIndex;
+        }
+      }
+      return -1;
+    }
+
+    function isAdjacentToCurrentSelection(token, sentence) {
+      const targetIndex = getSelectableTokenIndex(sentence, token.id);
+      if (targetIndex < 0) {
+        return false;
+      }
+      return selectedTokens.some(item => {
+        if (item.sentenceId !== sentence.sentenceId) {
+          return false;
+        }
+        const selectedIndex = getSelectableTokenIndex(sentence, item.tokenId);
+        return selectedIndex >= 0 && Math.abs(selectedIndex - targetIndex) === 1;
+      });
+    }
+
     function toggleSelectedToken(token, sentence) {
       const key = tokenKey(token.id, sentence.sentenceId);
       if (selectedTokens.some(item => item.key === key)) {
         selectedTokens = selectedTokens.filter(item => item.key !== key);
         return;
+      }
+      if (!selectedTokens.length) {
+        selectedTokens.push({
+          key,
+          tokenId: token.id,
+          sentenceId: sentence.sentenceId
+        });
+        return;
+      }
+      if (!isAdjacentToCurrentSelection(token, sentence)) {
+        selectedTokens = [];
       }
       selectedTokens.push({
         key,
@@ -302,21 +348,24 @@
     }
 
     function renderTrayStatusBar() {
+      const count = currentTray.length;
+      if (count === 0) {
+        return "";
+      }
       if (isBottomActionMode() && selectedTokens.length) {
         return "";
       }
-      const count = currentTray.length;
-      const latest = count ? currentTray[count - 1].word : "";
+      const latest = currentTray[count - 1].word;
       const latestText = latest.length > 24 ? `${latest.slice(0, 24)}...` : latest;
       return `
-        <section class="tray-status-bar ${count ? "has-items" : "is-empty"}" aria-label="tray状態">
+        <section class="tray-status-bar has-items" aria-label="tray状態">
           <div class="tray-status-main">
             <p class="tray-status-count">Tray ${count}件</p>
-            <p class="tray-status-latest">${count ? `最新: ${latestText}` : "最新: なし"}</p>
+            <p class="tray-status-latest">最新: ${latestText}</p>
           </div>
           <div class="tray-status-actions">
             <button class="button" id="trayStatusViewButton" type="button">Trayを見る</button>
-            ${count ? '<button class="button primary" id="trayStatusSaveButton" type="button">保存</button>' : ""}
+            <button class="button primary" id="trayStatusSaveButton" type="button">保存</button>
           </div>
         </section>
       `;

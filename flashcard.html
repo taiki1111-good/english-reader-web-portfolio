@@ -408,12 +408,12 @@
         <article id="studyCard" class="flash-study-card ${face.theme}" role="button" tabindex="0" data-study-card-id="${word.id}">
           <div class="flash-face">${face.html}</div>
           <p class="flash-card-hint">${revealedCards.has(word.id) ? "タップして戻す" : "タップして反転"}</p>
-        </article>
-        <div class="flash-study-nav">
-          <div class="flash-study-nav-row flash-study-nav-row-main">
+          <div class="flash-card-nav">
             <button id="studyPrevButton" class="button" type="button" ${currentIndex <= 0 ? "disabled" : ""}>前へ</button>
             <button id="studyNextButton" class="button" type="button" ${currentIndex >= visibleWords.length - 1 ? "disabled" : ""}>次へ</button>
           </div>
+        </article>
+        <div class="flash-study-nav">
           <div class="flash-study-nav-row">
             <button id="studyFlipButton" class="button primary" type="button">表裏切替</button>
           </div>
@@ -569,7 +569,11 @@
         return;
       }
 
-      if (event.target.closest("#studyCard") || event.target.closest("#focusCard")) {
+      if (event.target.closest("#studyCard") && !event.target.closest(".flash-card-nav")) {
+        revealCurrent();
+        return;
+      }
+      if (event.target.closest("#focusCard")) {
         revealCurrent();
         return;
       }
